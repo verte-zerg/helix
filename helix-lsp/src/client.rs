@@ -5,6 +5,7 @@ use crate::{
     Call, Error, LanguageServerId, OffsetEncoding, Result,
 };
 
+use super::copilot_types;
 use crate::lsp::{
     self, notification::DidChangeWorkspaceFolders, CodeActionCapabilityResolveSupport,
     DidChangeWorkspaceFoldersParams, OneOf, PositionEncodingKind, SignatureHelp, Url,
@@ -1521,6 +1522,20 @@ impl Client {
             let response: Option<lsp::WorkspaceEdit> = serde_json::from_value(json)?;
             Ok(response.unwrap_or_default())
         })
+    }
+
+    pub fn copilot_completion(
+        &self,
+        document: copilot_types::Document,
+    ) -> impl Future<Output = Result<Option<copilot_types::CompletionResponse>>> {
+        let params = copilot_types::CompletionRequestParams { doc: document };
+        let request = self.call::<copilot_types::CompletionRequest>(params);
+
+        async move {
+            let json = request.await?;
+            let response: Option<copilot_types::CompletionResponse> = serde_json::from_value(json)?;
+            Ok(response)
+        }
     }
 
     pub fn command(&self, command: lsp::Command) -> Option<impl Future<Output = Result<Value>>> {
