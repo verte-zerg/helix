@@ -10,7 +10,10 @@ use helix_core::encoding::Encoding;
 use helix_core::snippets::{ActiveSnippet, SnippetRenderCtx};
 use helix_core::syntax::{Highlight, LanguageServerFeature};
 use helix_core::text_annotations::{InlineAnnotation, Overlay};
-use helix_lsp::util::lsp_pos_to_pos;
+use helix_core::Range;
+use helix_lsp::copilot_types::DocCompletion;
+use helix_lsp::lsp;
+use helix_lsp::util::{generate_transaction_from_edits, lsp_pos_to_pos};
 use helix_stdx::faccess::{copy_metadata, readonly};
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
 use once_cell::sync::OnceCell;
@@ -36,10 +39,11 @@ use helix_core::{
     indent::{auto_detect_indent_style, IndentStyle},
     line_ending::auto_detect_line_ending,
     syntax::{self, LanguageConfiguration},
-    ChangeSet, Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
+    ChangeSet, Diagnostic, LineEnding, Rope, RopeBuilder, Selection, Syntax, Transaction,
 };
 
 use crate::{
+    copilot::Copilot,
     editor::Config,
     events::{DocumentDidChange, SelectionDidChange},
     view::ViewPosition,
@@ -132,7 +136,9 @@ pub enum DocumentOpenError {
     IoError(#[from] io::Error),
 }
 
+
 pub struct Document {
+    pub copilot: Copilot,
     pub(crate) id: DocumentId,
     text: Rope,
     selections: HashMap<ViewId, Selection>,
@@ -651,10 +657,33 @@ where
     *mut_ref = f(mem::take(mut_ref));
 }
 
-use helix_lsp::{lsp, Client, LanguageServerId, LanguageServerName};
+use helix_lsp::{copilot_types, Client, LanguageServerId, LanguageServerName};
 use url::Url;
 
 impl Document {
+    pub fn get_copilot_completion_for_rendering(&self) -> Option<&DocCompletion> {
+        let completion = self.copilot.get_completion_if_should_render()?;
+
+        if self.version as usize != completion.doc_version {
+            return None;
+        }
+        Some(completion)
+    }
+
+     pub fn apply_copilot_completion(&mut self, view_id: ViewId) {
+        let Some(completion) = self.copilot.get_completion_if_should_render() else { return; };
+        let Some(offset_encoding) = self.copilot.offset_encoding() else { return; };
+
+        let edit = lsp::TextEdit {
+            range: completion.lsp_range,
+            new_text: completion.text.clone(),
+        };
+        let transaction =
+            generate_transaction_from_edits(self.text(), vec![edit], offset_encoding);
+
+        self.apply(&transaction, view_id);
+    }
+
     pub fn from(
         text: Rope,
         encoding_with_bom_info: Option<(&'static Encoding, bool)>,
@@ -664,8 +693,10 @@ impl Document {
         let line_ending = config.load().default_line_ending.into();
         let changes = ChangeSet::new(text.slice(..));
         let old_state = None;
+        let copilot_auto_render = config.load().copilot_auto_render;
 
         Self {
+            copilot: Copilot::new(copilot_auto_render),
             id: DocumentId::default(),
             active_snippet: None,
             path: None,
@@ -1467,6 +1498,27 @@ impl Document {
         }
 
         true
+    }
+
+    pub fn copilot_document(
+        &self,
+        view_id: ViewId,
+        offset_encoding: helix_lsp::OffsetEncoding,
+    ) -> Option<copilot_types::Document> {
+        let position = self.position(view_id, offset_encoding);
+
+        Some(copilot_types::Document {
+            tab_size: self.tab_width(),
+            insert_spaces: true,
+            path: self.path()?.to_str()?.to_owned(),
+            indent_size: self.indent_width(),
+            version: self.version() as u32,
+            relative_path: self.relative_path()?.to_str()?.to_owned(),
+            language_id: self.language_id()?.to_owned(),
+            position,
+            source: self.text().to_string(),
+            uri: self.url()?.to_string(),
+        })
     }
 
     fn apply_inner(
