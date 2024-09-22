@@ -6,11 +6,14 @@ use helix_event::{
 use helix_lsp::copilot_types::DocCompletion;
 use helix_lsp::util::{lsp_pos_to_pos, lsp_range_to_range};
 use helix_view::document::Mode;
+use helix_view::copilot::CopilotStatus;
 use helix_view::Editor;
 use helix_view::events::DocumentDidChange;
 use tokio::time::Instant;
+use crate::compositor::Compositor;
 use crate::events::OnModeSwitch;
 use crate::handlers::Handlers;
+use crate::ui;
 use helix_view::handlers::lsp::CopilotRequestCompletionEvent;
 use crate::job::{dispatch, dispatch_blocking};
 
@@ -41,13 +44,13 @@ impl helix_event::AsyncHook for CopilotHandler {
         let (tx, rx) = cancelation();
         self.cancel = Some(tx);
 
-        dispatch_blocking(move |editor, _| {
-            copilot_completion(editor, rx);
+        dispatch_blocking(move |editor, compositor| {
+            copilot_completion(editor, compositor, rx);
         });
     }
 }
 
-fn copilot_completion(editor: &mut Editor, cancel: CancelRx) {
+fn copilot_completion(editor: &mut Editor, compositor: &mut Compositor, cancel: CancelRx) {
     let (view, doc) = current_ref!(editor);
     // check editor mode since we request a completion on DocumentDidChange even when not in Insert Mode  
     // (this cannot be checked within try_register_hooks unforunately)
@@ -59,25 +62,40 @@ fn copilot_completion(editor: &mut Editor, cancel: CancelRx) {
         .filter(|ls| ls.name() == "copilot")
         .next()
     else { return; };
-    let offset_encoding = copilot_ls.offset_encoding();
 
+    let copilot_id = copilot_ls.id();
+
+    let editor_view = compositor.find::<ui::EditorView>().unwrap();
+    let spinner = editor_view.spinners_mut().get_or_create(copilot_id);
+    spinner.start();
+
+    let offset_encoding = copilot_ls.offset_encoding();
     let copilot_future = if let Some(copilot_doc) = doc.copilot_document(view.id, offset_encoding) {
         copilot_ls.copilot_completion(copilot_doc)
     } else {
         return;
     };
+   
+    let (_, doc) = current!(editor);
+    doc.copilot.set_status(CopilotStatus::Fetching);
 
     tokio::spawn(async move {
         if let Some(item) = cancelable_future(copilot_future, cancel).await {
             if let Ok(Some(completion_reponse)) = item {
-                dispatch(move |editor, _| {
+                dispatch(move |editor, compositor| {
+                    let (view, doc) = current!(editor);
+
+                    let editor_view = compositor.find::<ui::EditorView>().unwrap();
+                    let spinner = editor_view.spinners_mut().get_or_create(copilot_id);
+                    spinner.stop();
+                    
+                    doc.copilot.set_status(CopilotStatus::Success(completion_reponse.completions.len()));
                     let completions = if completion_reponse.completions.len() > 0 {
                         completion_reponse.completions
                     } else {
                         return;
                     };
 
-                    let (view, doc) = current!(editor);
                     let doc_completions = completions
                         .into_iter()
                         .filter_map(|completion| {
@@ -151,6 +169,7 @@ pub(super) fn try_register_hooks(handlers: &Handlers) {
     register_hook!(move |event: &mut OnModeSwitch<'_, '_>| {
         let (_, doc) = current!(event.cx.editor);
 
+        doc.copilot.reset_status();
         if event.old_mode == Mode::Insert {
             doc.copilot.delete_state_and_should_not_render();
         } else if event.new_mode == Mode::Insert {

@@ -487,6 +487,7 @@ impl Default for StatusLineConfig {
             center: vec![],
             right: vec![
                 E::Diagnostics,
+                E::Copilot,
                 E::Selections,
                 E::Register,
                 E::Position,
@@ -525,6 +526,9 @@ pub enum StatusLineElement {
     /// The LSP activity spinner
     Spinner,
 
+    /// The copilot status
+    Copilot,
+    
     /// The file basename (the leaf of the open file's path)
     FileBaseName,
 

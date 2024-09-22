@@ -1,5 +1,6 @@
 use helix_core::{coords_at_pos, encoding, Position};
 use helix_lsp::lsp::DiagnosticSeverity;
+use helix_view::copilot::CopilotStatus;
 use helix_view::document::DEFAULT_LANGUAGE_NAME;
 use helix_view::{
     document::{Mode, SCRATCH_BUFFER_NAME},
@@ -140,6 +141,7 @@ where
     match element_id {
         helix_view::editor::StatusLineElement::Mode => render_mode,
         helix_view::editor::StatusLineElement::Spinner => render_lsp_spinner,
+        helix_view::editor::StatusLineElement::Copilot => render_copilot_status,
         helix_view::editor::StatusLineElement::FileBaseName => render_file_base_name,
         helix_view::editor::StatusLineElement::FileName => render_file_name,
         helix_view::editor::StatusLineElement::FileAbsolutePath => render_file_absolute_path,
@@ -311,6 +313,45 @@ where
         format!(" {} sel{} ", count, if count == 1 { "" } else { "s" }),
         None,
     );
+}
+
+fn render_copilot_status<F>(context: &mut RenderContext, write: F)
+where
+    F: Fn(&mut RenderContext, String, Option<Style>) + Copy,
+{
+    let Some(copilot_ls) = context
+        .doc
+        .language_servers()
+        .filter(|ls| ls.name() == "copilot")
+        .next()
+    else {
+        write(context, "".to_string(), None);
+        return;
+    };
+
+    let status = match context.doc.copilot.status() {
+        CopilotStatus::Fetching => {
+            let spinner = context.spinners.get(copilot_ls.id());
+            match spinner {
+                None => {
+                    write(context, "".to_string(), None);
+                    return;
+                }
+                Some(spinner) => {
+                    let frame = spinner.frame().unwrap_or(" ");
+                    format!("[{}]", frame)
+                }
+            }
+        }
+        CopilotStatus::Success(count) => format!("[{}]", count),
+        CopilotStatus::None => "[ ]".to_string(),
+    };
+
+    write(
+        context,
+        format!(" {} ", status),
+        Some(context.editor.theme.get("ui.statusline.copilot")),
+    )
 }
 
 fn render_primary_selection_length<F>(context: &mut RenderContext, write: F)
