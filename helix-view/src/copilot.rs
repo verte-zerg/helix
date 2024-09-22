@@ -5,9 +5,17 @@ use std::sync::Arc;
 static GLOBAL_AUTO_RENDER: once_cell::sync::OnceCell<Arc<Mutex<bool>>> =
     once_cell::sync::OnceCell::new();
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CopilotStatus {
+    Fetching,
+    Success(usize),
+    None,
+}
+
 #[derive(Clone, Debug)]
 pub struct Copilot {
     completion_response: Option<(Vec<DocCompletion>, OffsetEncoding)>,
+    status: CopilotStatus,
     render: Render,
 }
 
@@ -35,6 +43,7 @@ impl Copilot {
 
         return Self {
             completion_response: None,
+            status: CopilotStatus::None,
             render: Render {
                 global_auto_render: global_auto_render_completion,
                 should_render: None,
@@ -78,5 +87,17 @@ impl Copilot {
         let mut lock = self.render.global_auto_render.lock();
         *lock = !(*lock);
         return *lock;
+    }
+
+    pub fn set_status(&mut self, status: CopilotStatus) {
+        self.status = status;
+    }
+
+    pub fn reset_status(&mut self) {
+        self.status = CopilotStatus::None;
+    }
+
+    pub fn status(&self) -> CopilotStatus {
+        self.status.clone()
     }
 }
