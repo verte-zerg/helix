@@ -1,7 +1,7 @@
 use std::time::Duration;
 use helix_core::{coords_at_pos, softwrapped_dimensions, Rope};
 use helix_event::{
-    cancelable_future, cancelation, register_hook, send_blocking, CancelRx, CancelTx,
+    cancelable_future, register_hook, send_blocking, TaskController, TaskHandle,
 };
 use helix_lsp::copilot_types::DocCompletion;
 use helix_lsp::util::{lsp_pos_to_pos, lsp_range_to_range};
@@ -18,13 +18,13 @@ use helix_view::handlers::lsp::CopilotRequestCompletionEvent;
 use crate::job::{dispatch, dispatch_blocking};
 
 pub struct CopilotHandler {
-    cancel: Option<CancelTx>,
+    task_controller: TaskController,
 }
 
 impl CopilotHandler {
     pub fn new() -> Self {
         Self {
-            cancel: None,
+            task_controller: TaskController::new(),
         }
     }
 }
@@ -36,21 +36,19 @@ impl helix_event::AsyncHook for CopilotHandler {
         _: Self::Event,
         _: Option<Instant>,
     ) -> Option<Instant> {
-        self.cancel.take();
         Some(Instant::now() + Duration::from_millis(100))
     }
 
     fn finish_debounce(&mut self) {
-        let (tx, rx) = cancelation();
-        self.cancel = Some(tx);
+        let handle = self.task_controller.restart();
 
         dispatch_blocking(move |editor, compositor| {
-            copilot_completion(editor, compositor, rx);
+            copilot_completion(editor, compositor, handle);
         });
     }
 }
 
-fn copilot_completion(editor: &mut Editor, compositor: &mut Compositor, cancel: CancelRx) {
+fn copilot_completion(editor: &mut Editor, compositor: &mut Compositor, handle: TaskHandle) {
     let (view, doc) = current_ref!(editor);
     // check editor mode since we request a completion on DocumentDidChange even when not in Insert Mode  
     // (this cannot be checked within try_register_hooks unforunately)
@@ -80,7 +78,7 @@ fn copilot_completion(editor: &mut Editor, compositor: &mut Compositor, cancel: 
     doc.copilot.set_status(CopilotStatus::Fetching);
 
     tokio::spawn(async move {
-        if let Some(item) = cancelable_future(copilot_future, cancel).await {
+        if let Some(item) = cancelable_future(copilot_future, handle).await {
             if let Ok(Some(completion_reponse)) = item {
                 dispatch(move |editor, compositor| {
                     let (view, doc) = current!(editor);
